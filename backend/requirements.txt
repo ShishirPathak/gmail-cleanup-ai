@@ -1,0 +1,15 @@
+fastapi
+uvicorn[standard]
+sqlalchemy
+psycopg2-binary
+alembic
+pydantic
+pydantic-settings
+python-dotenv
+redis
+rq
+httpx
+google-auth
+google-auth-oauthlib
+google-api-python-client
+pgvector
