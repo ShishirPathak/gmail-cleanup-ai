@@ -8,6 +8,7 @@ class Email(Base):
 
     id = Column(Integer, primary_key=True, index=True)
     user_id = Column(Integer, ForeignKey("users.id"), nullable=False)
+    gmail_account_id = Column(Integer, ForeignKey("gmail_accounts.id"), nullable=True)
 
     gmail_message_id = Column(String, unique=True, nullable=False, index=True)
     gmail_thread_id = Column(String, nullable=True, index=True)
@@ -21,6 +22,7 @@ class Email(Base):
     body_text = Column(Text, nullable=True)
 
     gmail_labels = Column(Text, nullable=True)
+    gmail_label_ids = Column(Text, nullable=True)
     received_at = Column(DateTime(timezone=True), nullable=True)
 
     is_read = Column(Boolean, default=False)

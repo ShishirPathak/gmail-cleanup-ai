@@ -10,7 +10,7 @@ class UserAction(Base):
     user_id = Column(Integer, ForeignKey("users.id"), nullable=False)
     email_id = Column(Integer, ForeignKey("emails.id"), nullable=False)
 
-    action_taken = Column(String, nullable=False)  # keep / archive / delete
+    action_taken = Column(String, nullable=False)  # keep / archive / trash / mark_read / label
     action_source = Column(String, nullable=False, default="manual")  # manual / auto
 
     created_at = Column(DateTime(timezone=True), server_default=func.now())
