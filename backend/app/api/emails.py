@@ -1,5 +1,6 @@
 from typing import List
-
+from app.models.user_action import UserAction
+from app.schemas.action import UserActionCreate
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 
@@ -106,6 +107,13 @@ def get_email_detail(email_id: int, db: Session = Depends(get_db)):
         .first()
     )
 
+    actions = (
+        db.query(UserAction)
+        .filter(UserAction.email_id == email.id)
+        .order_by(UserAction.created_at.desc())
+        .all()
+    )
+
     return {
         "id": email.id,
         "gmail_message_id": email.gmail_message_id,
@@ -128,4 +136,68 @@ def get_email_detail(email_id: int, db: Session = Depends(get_db)):
             if classification
             else None
         ),
+        "actions": [
+            {
+                "id": action.id,
+                "action_taken": action.action_taken,
+                "action_source": action.action_source,
+                "created_at": action.created_at,
+            }
+            for action in actions
+        ],
     }
+
+@router.post("/{email_id}/actions")
+def add_user_action(
+    email_id: int,
+    payload: UserActionCreate,
+    db: Session = Depends(get_db),
+):
+    email = db.query(Email).filter(Email.id == email_id).first()
+    if not email:
+        raise HTTPException(status_code=404, detail="Email not found")
+
+    action = UserAction(
+        user_id=1,  # temporary hardcoded user
+        email_id=email_id,
+        action_taken=payload.action_taken,
+        action_source=payload.action_source,
+    )
+    db.add(action)
+    db.commit()
+    db.refresh(action)
+
+    return {
+        "id": action.id,
+        "email_id": action.email_id,
+        "user_id": action.user_id,
+        "action_taken": action.action_taken,
+        "action_source": action.action_source,
+        "created_at": action.created_at,
+    }
+
+
+@router.get("/{email_id}/actions")
+def list_email_actions(email_id: int, db: Session = Depends(get_db)):
+    email = db.query(Email).filter(Email.id == email_id).first()
+    if not email:
+        raise HTTPException(status_code=404, detail="Email not found")
+
+    actions = (
+        db.query(UserAction)
+        .filter(UserAction.email_id == email_id)
+        .order_by(UserAction.created_at.desc())
+        .all()
+    )
+
+    return [
+        {
+            "id": action.id,
+            "email_id": action.email_id,
+            "user_id": action.user_id,
+            "action_taken": action.action_taken,
+            "action_source": action.action_source,
+            "created_at": action.created_at,
+        }
+        for action in actions
+    ]
