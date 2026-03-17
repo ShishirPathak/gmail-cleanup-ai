@@ -3,14 +3,6 @@ from typing import List, Dict
 
 class GmailService:
     def fetch_recent_emails(self) -> List[Dict]:
-        """
-        Placeholder for Gmail API integration.
-        Later this will:
-        - use OAuth credentials
-        - call Gmail API
-        - fetch recent emails
-        - normalize payload
-        """
         return [
             {
                 "gmail_message_id": "sample-msg-1",
@@ -23,5 +15,53 @@ class GmailService:
                 "body_text": "Limited-time discount for members. Unsubscribe anytime.",
                 "gmail_labels": "INBOX,PROMOTIONS",
                 "has_unsubscribe": True,
-            }
+            },
+            {
+                "gmail_message_id": "sample-msg-2",
+                "gmail_thread_id": "sample-thread-2",
+                "sender_name": "Eventbrite",
+                "sender_email": "events@eventbrite.com",
+                "sender_domain": "eventbrite.com",
+                "subject": "Register now for AI meetup this Saturday",
+                "snippet": "Join local builders and founders for a weekend networking event.",
+                "body_text": "Reserve your seat now. Unsubscribe anytime.",
+                "gmail_labels": "INBOX,PROMOTIONS",
+                "has_unsubscribe": True,
+            },
+            {
+                "gmail_message_id": "sample-msg-3",
+                "gmail_thread_id": "sample-thread-3",
+                "sender_name": "Delta Airlines",
+                "sender_email": "notifications@delta.com",
+                "sender_domain": "delta.com",
+                "subject": "Your flight booking confirmation",
+                "snippet": "Your itinerary and booking details are attached.",
+                "body_text": "Booking confirmation for your upcoming travel.",
+                "gmail_labels": "INBOX,IMPORTANT",
+                "has_unsubscribe": False,
+            },
+            {
+                "gmail_message_id": "sample-msg-4",
+                "gmail_thread_id": "sample-thread-4",
+                "sender_name": "Tech Newsletter",
+                "sender_email": "digest@technews.com",
+                "sender_domain": "technews.com",
+                "subject": "Top AI engineering posts of the week",
+                "snippet": "This week in RAG, agents, evals, and inference optimization.",
+                "body_text": "Weekly newsletter roundup. Unsubscribe anytime.",
+                "gmail_labels": "INBOX,UPDATES",
+                "has_unsubscribe": True,
+            },
+            {
+                "gmail_message_id": "sample-msg-5",
+                "gmail_thread_id": "sample-thread-5",
+                "sender_name": "Recruiter",
+                "sender_email": "jobs@company.com",
+                "sender_domain": "company.com",
+                "subject": "Interview invitation for Backend Engineer role",
+                "snippet": "We would like to schedule an interview with you.",
+                "body_text": "Interview scheduling details enclosed.",
+                "gmail_labels": "INBOX,IMPORTANT",
+                "has_unsubscribe": False,
+            },
         ]

@@ -17,9 +17,11 @@ def init_db(retries: int = 10, delay: int = 3):
     for attempt in range(1, retries + 1):
         try:
             with engine.connect() as connection:
+                connection.execute(text("CREATE EXTENSION IF NOT EXISTS vector"))
+                connection.commit()
                 connection.execute(text("SELECT 1"))
             Base.metadata.create_all(bind=engine)
-            print("Database connected and tables created.")
+            print("Database connected, pgvector enabled, and tables created.")
             return
         except OperationalError as e:
             print(f"Database not ready yet (attempt {attempt}/{retries}): {e}")

@@ -1,6 +1,9 @@
 from typing import List
 from app.models.user_action import UserAction
 from app.schemas.action import UserActionCreate
+from app.models.email_embedding import EmailEmbedding
+from app.services.embedding_service import build_embedding_text, generate_fake_embedding
+from sqlalchemy import text
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 
@@ -12,6 +15,10 @@ from app.services.gmail_service import GmailService
 from app.services.recommendation_service import classify_email
 
 router = APIRouter(prefix="/emails", tags=["emails"])
+
+
+def _to_pgvector_literal(values) -> str:
+    return "[" + ",".join(str(float(value)) for value in values) + "]"
 
 
 @router.get("/", response_model=List[EmailResponse])
@@ -69,6 +76,24 @@ def sync_emails(db: Session = Depends(get_db)):
         )
         db.add(classification)
 
+        embedding_text = build_embedding_text(
+            sender_name=email.sender_name,
+            sender_email=email.sender_email,
+            sender_domain=email.sender_domain,
+            subject=email.subject,
+            snippet=email.snippet,
+            labels=email.gmail_labels,
+            has_unsubscribe=email.has_unsubscribe,
+        )
+        embedding_vector = generate_fake_embedding(embedding_text)
+
+        email_embedding = EmailEmbedding(
+            email_id=email.id,
+            model_name="fake-hash-v1",
+            embedding=embedding_vector,
+        )
+        db.add(email_embedding)
+
         created += 1
 
     db.commit()
@@ -114,6 +139,12 @@ def get_email_detail(email_id: int, db: Session = Depends(get_db)):
         .all()
     )
 
+    embedding = (
+        db.query(EmailEmbedding)
+        .filter(EmailEmbedding.email_id == email.id)
+        .first()
+    )
+
     return {
         "id": email.id,
         "gmail_message_id": email.gmail_message_id,
@@ -145,6 +176,15 @@ def get_email_detail(email_id: int, db: Session = Depends(get_db)):
             }
             for action in actions
         ],
+        "embedding": (
+            {
+                "id": embedding.id,
+                "model_name": embedding.model_name,
+                "dimension": len(embedding.embedding),
+            }
+            if embedding
+            else None
+        ),
     }
 
 @router.post("/{email_id}/actions")
@@ -200,4 +240,67 @@ def list_email_actions(email_id: int, db: Session = Depends(get_db)):
             "created_at": action.created_at,
         }
         for action in actions
+    ]
+
+@router.get("/{email_id}/similar")
+def get_similar_emails(email_id: int, db: Session = Depends(get_db)):
+    email = db.query(Email).filter(Email.id == email_id).first()
+    if not email:
+        raise HTTPException(status_code=404, detail="Email not found")
+
+    source_embedding = (
+        db.query(EmailEmbedding)
+        .filter(EmailEmbedding.email_id == email_id)
+        .first()
+    )
+    if not source_embedding:
+        raise HTTPException(status_code=404, detail="Embedding not found for email")
+
+    sql = text("""
+        SELECT
+            e.id,
+            e.sender_email,
+            e.subject,
+            e.snippet,
+            c.category,
+            c.suggested_action,
+            ue.action_taken,
+            ee.embedding <-> CAST(:embedding AS vector) AS distance
+        FROM email_embeddings ee
+        JOIN emails e ON e.id = ee.email_id
+        LEFT JOIN classifications c ON c.email_id = e.id
+        LEFT JOIN LATERAL (
+            SELECT action_taken
+            FROM user_actions ua
+            WHERE ua.email_id = e.id
+            ORDER BY ua.created_at DESC
+            LIMIT 1
+        ) ue ON true
+        WHERE ee.email_id != :email_id
+        ORDER BY ee.embedding <-> CAST(:embedding AS vector)
+        LIMIT 5
+    """)
+
+    embedding_literal = _to_pgvector_literal(source_embedding.embedding)
+
+    rows = db.execute(
+        sql,
+        {
+            "email_id": email_id,
+            "embedding": embedding_literal,
+        },
+    ).mappings().all()
+
+    return [
+        {
+            "id": row["id"],
+            "sender_email": row["sender_email"],
+            "subject": row["subject"],
+            "snippet": row["snippet"],
+            "category": row["category"],
+            "suggested_action": row["suggested_action"],
+            "last_user_action": row["action_taken"],
+            "distance": float(row["distance"]),
+        }
+        for row in rows
     ]
