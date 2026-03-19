@@ -22,11 +22,11 @@ class Settings(BaseSettings):
         "openid,email,profile,https://www.googleapis.com/auth/gmail.modify"
     )
 
-    embedding_provider: str = "fake"
-    embedding_model: str = "fake-hash-v1"
+    embedding_provider: str = "openai"
+    embedding_model: str = "text-embedding-3-small"
     embedding_api_key: str = ""
     embedding_base_url: str = "https://api.openai.com/v1"
-    embedding_dimension: int = 16
+    embedding_dimension: int = 1536
 
     llm_provider: str = "none"
     llm_model: str = ""
@@ -56,7 +56,17 @@ class Settings(BaseSettings):
 
     @cached_property
     def google_scopes(self) -> list[str]:
-        return [scope.strip() for scope in self.google_oauth_scopes.split(",") if scope.strip()]
+        alias_map = {
+            "email": "https://www.googleapis.com/auth/userinfo.email",
+            "profile": "https://www.googleapis.com/auth/userinfo.profile",
+        }
+        scopes: list[str] = []
+        for scope in self.google_oauth_scopes.split(","):
+            normalized = scope.strip()
+            if not normalized:
+                continue
+            scopes.append(alias_map.get(normalized, normalized))
+        return scopes
 
 
 settings = Settings()

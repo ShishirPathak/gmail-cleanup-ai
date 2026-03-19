@@ -1,66 +1,89 @@
-from typing import Dict
+from __future__ import annotations
+
+from sqlalchemy.orm import Session
+
+from app.core.config import settings
+from app.models.email import Email
+from app.services.llm_service import LLMService
+from app.services.recommendation_policy import (
+    classify_email,
+    evaluate_risk_flags,
+    summarize_similar_actions,
+)
+from app.services.similarity_service import SimilarityService
 
 
-def classify_email(subject: str, snippet: str, labels: str, has_unsubscribe: bool) -> Dict:
-    text = f"{subject or ''} {snippet or ''}".lower()
-    labels_text = (labels or "").lower()
+class RecommendationService:
+    def __init__(self, db: Session):
+        self.db = db
+        self.similarity_service = SimilarityService(db)
+        self.llm_service = LLMService()
 
-    score = 0
-    reasons = []
+    def classify_with_context(
+        self,
+        *,
+        email: Email,
+        embedding: list[float],
+    ) -> tuple[dict, list[dict]]:
+        base = classify_email(
+            sender_email=email.sender_email,
+            sender_domain=email.sender_domain,
+            subject=email.subject,
+            snippet=email.snippet,
+            labels=email.gmail_labels,
+            has_unsubscribe=email.has_unsubscribe,
+        )
+        similar_rows = self.similarity_service.find_similar_emails(
+            user_id=email.user_id,
+            email_id=email.id,
+            embedding=embedding,
+            limit=settings.similarity_limit_default,
+        )
 
-    protected_words = ["invoice", "receipt", "otp", "verification", "interview", "travel", "booking"]
-    for word in protected_words:
-        if word in text:
-            return {
-                "source": "rule",
-                "category": "important",
-                "importance": "high",
-                "suggested_action": "keep",
-                "confidence": 0.95,
-                "reason": f"contains protected keyword '{word}'",
-            }
+        recommended_action, count = summarize_similar_actions(similar_rows)
+        result = dict(base)
 
-    if "promotions" in labels_text:
-        score += 20
-        reasons.append("gmail promotions label")
+        if recommended_action and count >= 2 and result["confidence"] < 0.9:
+            result["source"] = "hybrid"
+            result["suggested_action"] = recommended_action
+            result["confidence"] = max(result["confidence"], 0.72)
+            result["reason"] = (
+                f"{result['reason']}; {count} similar emails had last action '{recommended_action}'"
+            )
 
-    promo_words = [
-        "sale",
-        "discount",
-        "offer",
-        "register now",
-        "limited time",
-        "deal",
-        "webinar",
-        "exclusive",
-        "save big",
-    ]
+        if result["confidence"] < 0.55 and self.llm_service.is_enabled():
+            llm_result = self.llm_service.classify_email(
+                sender_email=email.sender_email,
+                subject=email.subject,
+                snippet=email.snippet,
+            )
+            if llm_result:
+                result.update(
+                    {
+                        "source": "llm",
+                        "category": llm_result.get("category", result["category"]),
+                        "importance": llm_result.get("importance", result["importance"]),
+                        "suggested_action": llm_result.get(
+                            "suggested_action", result["suggested_action"]
+                        ),
+                        "confidence": float(llm_result.get("confidence", result["confidence"])),
+                        "reason": llm_result.get("reason", result["reason"]),
+                    }
+                )
 
-    for word in promo_words:
-        if word in text:
-            score += 10
-            reasons.append(f"contains '{word}'")
-            break
+        risk_flags = evaluate_risk_flags(
+            sender_email=email.sender_email,
+            sender_domain=email.sender_domain,
+            subject=email.subject,
+            snippet=email.snippet,
+        )
+        if risk_flags and result["suggested_action"] in {"archive", "trash"}:
+            result["source"] = "hybrid"
+            result["category"] = "important"
+            result["importance"] = "high"
+            result["suggested_action"] = "keep"
+            result["confidence"] = max(float(result["confidence"]), 0.95)
+            result["reason"] = "guardrail override because " + ", ".join(risk_flags)
 
-    if has_unsubscribe:
-        score += 15
-        reasons.append("unsubscribe detected")
-
-    if score >= 30:
-        return {
-            "source": "rule",
-            "category": "promotion",
-            "importance": "low",
-            "suggested_action": "archive",
-            "confidence": 0.75,
-            "reason": ", ".join(reasons),
-        }
-
-    return {
-        "source": "rule",
-        "category": "unknown",
-        "importance": "medium",
-        "suggested_action": "review",
-        "confidence": 0.40,
-        "reason": ", ".join(reasons) if reasons else "insufficient signal",
-    }
+        result["risk_flags"] = risk_flags
+        return result, similar_rows

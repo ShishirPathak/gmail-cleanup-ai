@@ -28,16 +28,23 @@ def decrypt_secret(value: str | None) -> str | None:
     return _fernet().decrypt(value.encode("utf-8")).decode("utf-8")
 
 
-def create_access_token(subject: str, expires_minutes: int | None = None) -> str:
+def create_signed_token(
+    payload: dict[str, Any],
+    expires_minutes: int | None = None,
+) -> str:
     expires_delta = timedelta(
         minutes=expires_minutes or settings.token_expiry_minutes
     )
-    payload = {
-        "sub": subject,
+    token_payload = {
+        **payload,
         "exp": datetime.now(timezone.utc) + expires_delta,
         "iat": datetime.now(timezone.utc),
     }
-    return jwt.encode(payload, settings.secret_key, algorithm="HS256")
+    return jwt.encode(token_payload, settings.secret_key, algorithm="HS256")
+
+
+def create_access_token(subject: str, expires_minutes: int | None = None) -> str:
+    return create_signed_token({"sub": subject, "type": "access"}, expires_minutes)
 
 
 def decode_access_token(token: str) -> dict[str, Any]:

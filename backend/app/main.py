@@ -23,6 +23,21 @@ app.add_middleware(
 )
 
 
+def sync_pk_sequences():
+    statements = [
+        "SELECT setval(pg_get_serial_sequence('users', 'id'), COALESCE((SELECT MAX(id) FROM users), 1), true)",
+        "SELECT setval(pg_get_serial_sequence('gmail_accounts', 'id'), COALESCE((SELECT MAX(id) FROM gmail_accounts), 1), true)",
+        "SELECT setval(pg_get_serial_sequence('emails', 'id'), COALESCE((SELECT MAX(id) FROM emails), 1), true)",
+        "SELECT setval(pg_get_serial_sequence('classifications', 'id'), COALESCE((SELECT MAX(id) FROM classifications), 1), true)",
+        "SELECT setval(pg_get_serial_sequence('user_actions', 'id'), COALESCE((SELECT MAX(id) FROM user_actions), 1), true)",
+        "SELECT setval(pg_get_serial_sequence('email_embeddings', 'id'), COALESCE((SELECT MAX(id) FROM email_embeddings), 1), true)",
+    ]
+
+    with engine.begin() as connection:
+        for statement in statements:
+            connection.execute(text(statement))
+
+
 def run_schema_upgrades():
     statements = [
         "ALTER TABLE users ADD COLUMN IF NOT EXISTS google_subject VARCHAR",
@@ -51,6 +66,7 @@ def init_db(retries: int = 10, delay: int = 3):
                 connection.execute(text("SELECT 1"))
             Base.metadata.create_all(bind=engine)
             run_schema_upgrades()
+            sync_pk_sequences()
             print("Database connected, pgvector enabled, and tables created.")
             return
         except OperationalError as e:
@@ -73,6 +89,8 @@ def startup():
             db.commit()
     finally:
         db.close()
+
+    sync_pk_sequences()
 
 
 app.include_router(health_router)
