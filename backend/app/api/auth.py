@@ -18,6 +18,31 @@ from app.services.gmail_service import GmailService
 router = APIRouter(prefix="/auth", tags=["auth"])
 
 
+@router.post("/dev-login")
+def dev_login(db: Session = Depends(get_db)):
+    if settings.environment.lower() == "production":
+        raise HTTPException(status_code=404, detail="Not found")
+
+    email = "demo.user@example.com"
+    account_service = AccountService(db)
+    user = account_service.upsert_google_user(
+        google_subject=None,
+        email=email,
+        name="Demo User",
+    )
+    db.commit()
+
+    access_token = create_access_token(str(user.id))
+    return {
+        "token": access_token,
+        "user": {
+            "id": user.id,
+            "email": user.email,
+            "name": user.name,
+        },
+    }
+
+
 @router.get("/google/login")
 def google_login():
     gmail_service = GmailService()

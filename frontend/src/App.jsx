@@ -132,6 +132,28 @@ function clampText(value, maxLength = 140) {
   return value.length > maxLength ? `${value.slice(0, maxLength).trim()}...` : value;
 }
 
+function formatRecommendationSource(source) {
+  if (!source) {
+    return "Unknown";
+  }
+
+  const labels = {
+    rule: "Rules",
+    hybrid: "Rules + Similarity",
+    llm: "LLM",
+  };
+  return labels[source] || source;
+}
+
+function describeRecommendationSource(source) {
+  const descriptions = {
+    rule: "Protected patterns and deterministic inbox rules produced this recommendation.",
+    hybrid: "Rules were adjusted using similar past email behavior and safety guardrails.",
+    llm: "An LLM handled this ambiguous case after the deterministic rules were not confident enough.",
+  };
+  return descriptions[source] || "Recommendation source unavailable.";
+}
+
 export default function App() {
   const [token, setToken] = useState(() => localStorage.getItem("gmail_cleanup_token") || "");
   const [auth, setAuth] = useState(null);
@@ -142,9 +164,21 @@ export default function App() {
   const [loading, setLoading] = useState(false);
   const [syncing, setSyncing] = useState(false);
   const [error, setError] = useState("");
+  const [notice, setNotice] = useState("");
   const [labelInput, setLabelInput] = useState("");
   const [confirmHighRisk, setConfirmHighRisk] = useState(false);
   const [syncResult, setSyncResult] = useState(null);
+  const [actionInFlight, setActionInFlight] = useState("");
+
+  function resetMailboxState() {
+    setEmails([]);
+    setSelectedEmail(null);
+    setSimilarEmails([]);
+    setActionHistory([]);
+    setLabelInput("");
+    setConfirmHighRisk(false);
+    setSyncResult(null);
+  }
 
   useEffect(() => {
     const params = new URLSearchParams(window.location.search);
@@ -159,7 +193,8 @@ export default function App() {
   useEffect(() => {
     if (!token) {
       setAuth(null);
-      loadEmails("");
+      setError("");
+      resetMailboxState();
       return;
     }
 
@@ -173,17 +208,21 @@ export default function App() {
   }, [token]);
 
   useEffect(() => {
-    loadEmails(token);
+    if (token) {
+      loadEmails(token);
+    }
   }, [token]);
 
   async function loadEmails(activeToken) {
     setLoading(true);
-    setError("");
     try {
       const data = await apiFetch("/emails", {}, activeToken);
       setEmails(data);
       if (data.length > 0) {
-        await loadEmailDetail(data[0].id, activeToken);
+        const nextSelectedId = selectedEmail?.id;
+        const nextSelectedEmail =
+          (nextSelectedId && data.find((item) => item.id === nextSelectedId)) || data[0];
+        await loadEmailDetail(nextSelectedEmail.id, activeToken);
       } else {
         setSelectedEmail(null);
         setSimilarEmails([]);
@@ -197,7 +236,6 @@ export default function App() {
   }
 
   async function loadEmailDetail(emailId, activeToken = token) {
-    setError("");
     try {
       const [detail, similar, actions] = await Promise.all([
         apiFetch(`/emails/${emailId}`, {}, activeToken),
@@ -224,12 +262,29 @@ export default function App() {
     }
   }
 
+  async function useDemoInbox() {
+    setError("");
+    setNotice("");
+    try {
+      const login = await apiFetch("/auth/dev-login", { method: "POST" });
+      localStorage.setItem("gmail_cleanup_token", login.token);
+      setToken(login.token);
+      await apiFetch("/emails/dev-seed", { method: "POST" }, login.token);
+      setNotice("Demo inbox loaded. Review the recommendation source on each sample email.");
+      await loadEmails(login.token);
+    } catch (err) {
+      setError(err.message);
+    }
+  }
+
   async function syncEmails() {
     setSyncing(true);
     setError("");
+    setNotice("");
     try {
       const result = await apiFetch("/emails/sync", { method: "POST" }, token);
       setSyncResult(result);
+      setNotice(`Sync complete: ${result.created} created, ${result.updated} updated.`);
       await loadEmails(token);
     } catch (err) {
       setError(err.message);
@@ -243,7 +298,9 @@ export default function App() {
       return;
     }
 
+    setActionInFlight(action);
     setError("");
+    setNotice("");
     try {
       await apiFetch(
         `/emails/${selectedEmail.id}/execute`,
@@ -257,9 +314,18 @@ export default function App() {
         },
         token,
       );
-      await loadEmailDetail(selectedEmail.id);
+      const label = {
+        archive: "archived to Gmail",
+        trash: "moved to Gmail trash",
+        mark_read: "marked as read in Gmail",
+        label: "labels applied in Gmail",
+      }[action] || "action applied";
+      setNotice(`Email ${label}.`);
+      await loadEmails(token);
     } catch (err) {
       setError(err.message);
+    } finally {
+      setActionInFlight("");
     }
   }
 
@@ -267,6 +333,9 @@ export default function App() {
     localStorage.removeItem("gmail_cleanup_token");
     setToken("");
     setAuth(null);
+    setNotice("");
+    setError("");
+    resetMailboxState();
   }
 
   const selectedLabels = selectedEmail?.gmail_labels
@@ -310,6 +379,9 @@ export default function App() {
                 <button onClick={syncEmails} disabled={syncing}>
                   {syncing ? "Syncing..." : "Sync inbox"}
                 </button>
+                <button className="secondary" onClick={useDemoInbox}>
+                  Load demo inbox
+                </button>
                 <button className="secondary" onClick={signOut}>
                   Sign out
                 </button>
@@ -325,7 +397,12 @@ export default function App() {
           ) : (
             <>
               <p className="muted">Connect Google to sync and act on real Gmail messages.</p>
-              <button onClick={startGoogleLogin}>Sign in with Google</button>
+              <div className="button-stack">
+                <button onClick={startGoogleLogin}>Sign in with Google</button>
+                <button className="secondary" onClick={useDemoInbox}>
+                  Use demo inbox
+                </button>
+              </div>
             </>
           )}
         </div>
@@ -383,6 +460,7 @@ export default function App() {
           </div>
         </section>
         {error ? <div className="alert error">{error}</div> : null}
+        {notice ? <div className="alert success">{notice}</div> : null}
         {!selectedEmail ? (
           <div className="empty-state">
             <h2>No email selected</h2>
@@ -463,24 +541,33 @@ export default function App() {
                 <div className={`panel recommendation-panel recommendation-panel-${getTone(selectedEmail.classification?.suggested_action)}`}>
                   <div className="recommendation-header">
                     <div>
-                      <p className="eyebrow">Recommendation</p>
+                      <p className="eyebrow">Recommendation Source</p>
                       <h2>{selectedEmail.classification?.suggested_action || "review"}</h2>
                     </div>
-                    <span className="tone-pill neutral">{selectedEmail.classification?.category || "unknown"}</span>
+                    <span className="tone-pill neutral">
+                      {formatRecommendationSource(selectedEmail.classification?.source)}
+                    </span>
                   </div>
                   <h2>Recommendation</h2>
+                  <p className="muted source-copy">
+                    {describeRecommendationSource(selectedEmail.classification?.source)}
+                  </p>
                   <div className="stat-grid">
                     <div>
                       <span className="stat-label">Importance</span>
                       <strong>{selectedEmail.classification?.importance || "unknown"}</strong>
                     </div>
                     <div>
-                      <span className="stat-label">Confidence</span>
-                      <strong>
-                        {selectedEmail.classification?.confidence
-                          ? selectedEmail.classification.confidence.toFixed(2)
-                          : "n/a"}
-                      </strong>
+                        <span className="stat-label">Confidence</span>
+                        <strong>
+                          {selectedEmail.classification?.confidence
+                            ? selectedEmail.classification.confidence.toFixed(2)
+                            : "n/a"}
+                        </strong>
+                      </div>
+                    <div>
+                      <span className="stat-label">Category</span>
+                      <strong>{selectedEmail.classification?.category || "unknown"}</strong>
                     </div>
                   </div>
                   <div className="reason-box">
@@ -503,12 +590,25 @@ export default function App() {
                   <p className="eyebrow">Human review</p>
                   <h2>Cleanup actions</h2>
                   <div className="button-stack">
-                    <button onClick={() => executeAction("archive")}>Archive</button>
-                    <button onClick={() => executeAction("trash")} className="danger">
-                      Move to trash
+                    <button
+                      onClick={() => executeAction("archive")}
+                      disabled={Boolean(actionInFlight)}
+                    >
+                      {actionInFlight === "archive" ? "Archiving..." : "Archive"}
                     </button>
-                    <button onClick={() => executeAction("mark_read")} className="secondary">
-                      Mark as read
+                    <button
+                      onClick={() => executeAction("trash")}
+                      className="danger"
+                      disabled={Boolean(actionInFlight)}
+                    >
+                      {actionInFlight === "trash" ? "Moving..." : "Move to trash"}
+                    </button>
+                    <button
+                      onClick={() => executeAction("mark_read")}
+                      className="secondary"
+                      disabled={Boolean(actionInFlight)}
+                    >
+                      {actionInFlight === "mark_read" ? "Updating..." : "Mark as read"}
                     </button>
                   </div>
                   <label className="field">
@@ -519,8 +619,12 @@ export default function App() {
                       placeholder="Finance, Follow Up"
                     />
                   </label>
-                  <button className="secondary full-width" onClick={() => executeAction("label")}>
-                    Apply labels
+                  <button
+                    className="secondary full-width"
+                    onClick={() => executeAction("label")}
+                    disabled={Boolean(actionInFlight)}
+                  >
+                    {actionInFlight === "label" ? "Applying..." : "Apply labels"}
                   </button>
                   <label className="checkbox-inline">
                     <input

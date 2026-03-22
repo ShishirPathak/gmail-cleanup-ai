@@ -1,8 +1,12 @@
 from typing import List
+from datetime import datetime, timedelta, timezone
+from uuid import uuid4
 from fastapi import APIRouter, Depends, HTTPException
+from sqlalchemy import or_
 from sqlalchemy.orm import Session
 
 from app.api.deps import get_current_user
+from app.core.config import settings
 from app.db.redis import redis_client
 from app.db.session import get_db
 from app.models.classification import Classification
@@ -13,7 +17,7 @@ from app.models.user_action import UserAction
 from app.schemas.action import CleanupActionRequest, UserActionCreate
 from app.schemas.email import EmailResponse
 from app.services.account_service import AccountService
-from app.services.embedding_service import EmbeddingService, build_embedding_text
+from app.services.embedding_service import EmbeddingService, FakeEmbeddingProvider, build_embedding_text
 from app.services.gmail_service import GmailService
 from app.services.recommendation_policy import evaluate_risk_flags
 from app.services.recommendation_service import RecommendationService
@@ -29,7 +33,10 @@ def list_emails(
 ):
     emails = (
         db.query(Email)
-        .filter(Email.user_id == current_user.id)
+        .filter(
+            Email.user_id == current_user.id,
+            _email_is_in_inbox(),
+        )
         .order_by(Email.received_at.desc().nullslast(), Email.created_at.desc())
         .limit(50)
         .all()
@@ -138,6 +145,163 @@ def sync_emails(
         redis_client.delete(sync_lock_key)
 
 
+@router.post("/dev-seed")
+def seed_demo_emails(
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    if settings.environment.lower() == "production":
+        raise HTTPException(status_code=404, detail="Not found")
+
+    demo_email_ids = [
+        row[0]
+        for row in db.query(Email.id)
+        .filter(
+            Email.user_id == current_user.id,
+            Email.gmail_message_id.like("demo-%"),
+        )
+        .all()
+    ]
+    if demo_email_ids:
+        db.query(UserAction).filter(UserAction.email_id.in_(demo_email_ids)).delete(
+            synchronize_session=False
+        )
+        db.query(Classification).filter(Classification.email_id.in_(demo_email_ids)).delete(
+            synchronize_session=False
+        )
+        db.query(EmailEmbedding).filter(EmailEmbedding.email_id.in_(demo_email_ids)).delete(
+            synchronize_session=False
+        )
+        db.query(Email).filter(Email.id.in_(demo_email_ids)).delete(synchronize_session=False)
+        db.commit()
+
+    now = datetime.now(timezone.utc)
+    samples = [
+        {
+            "sender_name": "Acme Alerts",
+            "sender_email": "security@accounts.acme.com",
+            "sender_domain": "accounts.acme.com",
+            "subject": "Your verification code is 482193",
+            "snippet": "Use this code to complete your sign in.",
+            "body_text": "We noticed a login attempt. Use code 482193 to continue.",
+            "gmail_labels": "INBOX,IMPORTANT",
+            "gmail_label_ids": "INBOX,IMPORTANT",
+            "has_unsubscribe": False,
+            "is_read": False,
+            "received_at": now - timedelta(minutes=12),
+        },
+        {
+            "sender_name": "Studio Weekly",
+            "sender_email": "news@studio-weekly.demo",
+            "sender_domain": "studio-weekly.demo",
+            "subject": "This week in product design",
+            "snippet": "Fresh articles, community links, and a short workshop invite.",
+            "body_text": "A short curated roundup from the design community. Read the latest stories and resources.",
+            "gmail_labels": "INBOX,UPDATES",
+            "gmail_label_ids": "INBOX,UPDATES",
+            "has_unsubscribe": False,
+            "is_read": False,
+            "received_at": now - timedelta(hours=3),
+        },
+        {
+            "sender_name": "Nimbus",
+            "sender_email": "hello@nimbus-app.demo",
+            "sender_domain": "nimbus-app.demo",
+            "subject": "Your team workspace digest",
+            "snippet": "A quick summary of this week's comments, mentions, and next steps.",
+            "body_text": "Here is a summary of recent work across your team. There are comments, mentions, and project updates to review.",
+            "gmail_labels": "INBOX",
+            "gmail_label_ids": "INBOX",
+            "has_unsubscribe": False,
+            "is_read": False,
+            "received_at": now - timedelta(hours=7),
+        },
+        {
+            "sender_name": "MarketLane",
+            "sender_email": "offers@marketlane.demo",
+            "sender_domain": "marketlane.demo",
+            "subject": "Weekend sale just started",
+            "snippet": "Members save 25% today only. Limited time offer.",
+            "body_text": "Exclusive member sale. Shop now and save 25 percent today only.",
+            "gmail_labels": "INBOX,PROMOTIONS",
+            "gmail_label_ids": "INBOX,PROMOTIONS",
+            "has_unsubscribe": True,
+            "is_read": False,
+            "received_at": now - timedelta(days=1),
+        },
+    ]
+
+    embedding_service = EmbeddingService()
+    recommendation_service = RecommendationService(db)
+    created = []
+    used_fallback_embeddings = False
+
+    for sample in samples:
+        email = Email(
+            user_id=current_user.id,
+            gmail_message_id=f"demo-{uuid4()}",
+            gmail_thread_id=f"demo-thread-{uuid4()}",
+            **sample,
+        )
+        db.add(email)
+        db.flush()
+
+        embedding_text = build_embedding_text(
+            sender_name=email.sender_name,
+            sender_email=email.sender_email,
+            sender_domain=email.sender_domain,
+            subject=email.subject,
+            snippet=email.snippet,
+            labels=email.gmail_labels,
+            has_unsubscribe=email.has_unsubscribe,
+        )
+        try:
+            embedding_result = embedding_service.embed_text(embedding_text)
+        except Exception:
+            embedding_service = EmbeddingService(provider=FakeEmbeddingProvider())
+            embedding_result = embedding_service.embed_text(embedding_text)
+            used_fallback_embeddings = True
+        db.add(
+            EmailEmbedding(
+                email_id=email.id,
+                model_name=embedding_result.model_name,
+                embedding=embedding_result.vector,
+            )
+        )
+
+        recommendation, _ = recommendation_service.classify_with_context(
+            email=email,
+            embedding=embedding_result.vector,
+        )
+        db.add(
+            Classification(
+                email_id=email.id,
+                source=recommendation["source"],
+                category=recommendation["category"],
+                importance=recommendation["importance"],
+                suggested_action=recommendation["suggested_action"],
+                confidence=recommendation["confidence"],
+                reason=recommendation["reason"],
+            )
+        )
+        created.append(
+            {
+                "id": email.id,
+                "subject": email.subject,
+                "source": recommendation["source"],
+                "action": recommendation["suggested_action"],
+            }
+        )
+
+    db.commit()
+    return {
+        "message": "Demo inbox seeded",
+        "count": len(created),
+        "emails": created,
+        "used_fallback_embeddings": used_fallback_embeddings,
+    }
+
+
 @router.get("/classifications")
 def list_classifications(
     db: Session = Depends(get_db),
@@ -215,6 +379,7 @@ def get_email_detail(
         ),
         "classification": (
             {
+                "source": classification.source,
                 "category": classification.category,
                 "importance": classification.importance,
                 "suggested_action": classification.suggested_action,
@@ -321,15 +486,17 @@ def execute_cleanup_action(
     gmail_service = GmailService(db)
     if payload.action == "archive":
         gmail_service.archive_message(account, email.gmail_message_id)
-        if email.gmail_labels:
-            email.gmail_labels = ",".join(
-                label for label in email.gmail_labels.split(",") if label != "INBOX"
-            )
+        email.gmail_labels = _remove_label(email.gmail_labels, "INBOX")
+        email.gmail_label_ids = _remove_label(email.gmail_label_ids, "INBOX")
     elif payload.action == "trash":
         gmail_service.trash_message(account, email.gmail_message_id)
+        email.gmail_labels = _add_label(_remove_label(email.gmail_labels, "INBOX"), "TRASH")
+        email.gmail_label_ids = _add_label(_remove_label(email.gmail_label_ids, "INBOX"), "TRASH")
     elif payload.action == "mark_read":
         gmail_service.mark_as_read(account, email.gmail_message_id)
         email.is_read = True
+        email.gmail_labels = _remove_label(email.gmail_labels, "UNREAD")
+        email.gmail_label_ids = _remove_label(email.gmail_label_ids, "UNREAD")
     elif payload.action == "label":
         if not payload.label_names:
             raise HTTPException(status_code=400, detail="label_names is required for label action")
@@ -423,3 +590,26 @@ def _get_owned_email(db: Session, current_user: User, email_id: int) -> Email | 
         .filter(Email.id == email_id, Email.user_id == current_user.id)
         .first()
     )
+
+
+def _email_is_in_inbox():
+    return or_(
+        Email.gmail_labels == "INBOX",
+        Email.gmail_labels.like("INBOX,%"),
+        Email.gmail_labels.like("%,INBOX"),
+        Email.gmail_labels.like("%,INBOX,%"),
+    )
+
+
+def _remove_label(value: str | None, label: str) -> str | None:
+    if not value:
+        return None
+    labels = [item.strip() for item in value.split(",") if item.strip() and item.strip() != label]
+    return ",".join(labels) if labels else None
+
+
+def _add_label(value: str | None, label: str) -> str:
+    labels = [item.strip() for item in (value or "").split(",") if item.strip()]
+    if label not in labels:
+        labels.append(label)
+    return ",".join(labels)

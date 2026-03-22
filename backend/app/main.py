@@ -5,12 +5,11 @@ from sqlalchemy import text
 from sqlalchemy.exc import OperationalError
 
 from app.core.config import settings
-from app.db.session import Base, engine, SessionLocal
+from app.db.session import Base, engine
 from app.db.base import *
 from app.api.health import router as health_router
 from app.api.auth import router as auth_router
 from app.api.emails import router as emails_router
-from app.models.user import User
 
 app = FastAPI(title=settings.app_name)
 
@@ -79,17 +78,6 @@ def init_db(retries: int = 10, delay: int = 3):
 @app.on_event("startup")
 def startup():
     init_db()
-
-    db = SessionLocal()
-    try:
-        existing = db.query(User).filter(User.id == 1).first()
-        if not existing:
-            user = User(id=1, email="test@example.com", name="Test User")
-            db.add(user)
-            db.commit()
-    finally:
-        db.close()
-
     sync_pk_sequences()
 
 

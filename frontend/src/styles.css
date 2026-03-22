@@ -517,6 +517,10 @@ p {
   font-size: 1.1rem;
 }
 
+.source-copy {
+  margin: 0 0 1rem;
+}
+
 .button-stack button,
 .button-row button,
 .full-width {
@@ -525,7 +529,7 @@ p {
 
 .button-row {
   display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(0, 1fr));
   gap: 0.75rem;
   margin-top: 0.9rem;
 }
@@ -588,6 +592,11 @@ p {
 .alert.error {
   background: #fee9e7;
   color: #7f1d16;
+}
+
+.alert.success {
+  background: #e2f4eb;
+  color: #0d5c47;
 }
 
 .empty-state {

@@ -3,6 +3,7 @@ from app.services.embedding_service import (
     FakeEmbeddingProvider,
     build_embedding_text,
 )
+from app.services.llm_service import normalize_llm_classification
 
 
 def test_fake_embedding_is_deterministic():
@@ -32,3 +33,22 @@ def test_build_embedding_text_includes_key_fields():
     )
     assert "sender_email:offers@example.com" in text
     assert "unsubscribe:True" in text
+
+
+def test_normalize_llm_classification_clamps_invalid_values():
+    result = normalize_llm_classification(
+        {
+            "category": "totally-new-category",
+            "importance": "urgent",
+            "suggested_action": "delete_forever",
+            "confidence": 4.2,
+            "reason": "",
+        }
+    )
+    assert result == {
+        "category": "unknown",
+        "importance": "medium",
+        "suggested_action": "review",
+        "confidence": 1.0,
+        "reason": "LLM classification returned without an explanation",
+    }

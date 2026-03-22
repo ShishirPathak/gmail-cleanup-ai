@@ -52,11 +52,17 @@ class RecommendationService:
             )
 
         if result["confidence"] < 0.55 and self.llm_service.is_enabled():
-            llm_result = self.llm_service.classify_email(
-                sender_email=email.sender_email,
-                subject=email.subject,
-                snippet=email.snippet,
-            )
+            try:
+                llm_result = self.llm_service.classify_email(
+                    sender_email=email.sender_email,
+                    sender_domain=email.sender_domain,
+                    subject=email.subject,
+                    snippet=email.snippet,
+                    labels=email.gmail_labels,
+                    has_unsubscribe=email.has_unsubscribe,
+                )
+            except Exception:
+                llm_result = None
             if llm_result:
                 result.update(
                     {

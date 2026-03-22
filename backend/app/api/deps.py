@@ -13,9 +13,6 @@ def get_current_user(
     db: Session = Depends(get_db),
 ) -> User:
     if not authorization or not authorization.startswith("Bearer "):
-        user = db.query(User).filter(User.id == 1).first()
-        if user:
-            return user
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Authentication required",
