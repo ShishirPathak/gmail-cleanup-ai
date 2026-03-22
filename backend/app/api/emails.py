@@ -14,7 +14,7 @@ from app.models.email import Email
 from app.models.email_embedding import EmailEmbedding
 from app.models.user import User
 from app.models.user_action import UserAction
-from app.schemas.action import CleanupActionRequest, UserActionCreate
+from app.schemas.action import BulkArchiveRequest, CleanupActionRequest, UserActionCreate
 from app.schemas.email import EmailResponse
 from app.services.account_service import AccountService
 from app.services.embedding_service import EmbeddingService, FakeEmbeddingProvider, build_embedding_text
@@ -329,6 +329,116 @@ def list_classifications(
     ]
 
 
+@router.get("/archive-candidates")
+def list_archive_candidates(
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    emails = (
+        db.query(Email)
+        .filter(
+            Email.user_id == current_user.id,
+            _email_is_in_inbox(),
+        )
+        .order_by(Email.received_at.desc().nullslast(), Email.created_at.desc())
+        .limit(100)
+        .all()
+    )
+
+    candidates = []
+    for email in emails:
+        classification = _get_latest_classification(db, email.id)
+        if not classification or classification.suggested_action != "archive":
+            continue
+
+        risk_flags = evaluate_risk_flags(
+            sender_email=email.sender_email,
+            sender_domain=email.sender_domain,
+            subject=email.subject,
+            snippet=email.snippet,
+        )
+        if risk_flags:
+            continue
+
+        candidates.append(
+            {
+                "id": email.id,
+                "sender_name": email.sender_name,
+                "sender_email": email.sender_email,
+                "subject": email.subject,
+                "snippet": email.snippet,
+                "received_at": email.received_at,
+                "created_at": email.created_at,
+                "classification": {
+                    "source": classification.source,
+                    "category": classification.category,
+                    "importance": classification.importance,
+                    "suggested_action": classification.suggested_action,
+                    "confidence": classification.confidence,
+                    "reason": classification.reason,
+                },
+            }
+        )
+
+    return {"count": len(candidates), "emails": candidates}
+
+
+@router.post("/archive-candidates/archive")
+def archive_reviewed_candidates(
+    payload: BulkArchiveRequest,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    account = AccountService(db).get_primary_account(current_user.id)
+    if not account and not _all_demo_emails(db, current_user, payload.email_ids):
+        raise HTTPException(status_code=400, detail="Connect a Gmail account first")
+
+    if not payload.email_ids:
+        raise HTTPException(status_code=400, detail="email_ids is required")
+
+    gmail_service = GmailService(db) if account else None
+    archived = []
+    skipped = []
+
+    for email_id in payload.email_ids:
+        email = _get_owned_email(db, current_user, email_id)
+        if not email or not _has_inbox_label(email.gmail_labels):
+            skipped.append({"email_id": email_id, "reason": "Email not available in inbox"})
+            continue
+
+        classification = _get_latest_classification(db, email.id)
+        if not classification or classification.suggested_action != "archive":
+            skipped.append({"email_id": email.id, "reason": "Latest recommendation is not archive"})
+            continue
+
+        risk_flags = evaluate_risk_flags(
+            sender_email=email.sender_email,
+            sender_domain=email.sender_domain,
+            subject=email.subject,
+            snippet=email.snippet,
+        )
+        if risk_flags:
+            skipped.append({"email_id": email.id, "reason": "Email is high risk"})
+            continue
+
+        if account:
+            gmail_service.archive_message(account, email.gmail_message_id)
+        email.gmail_labels = _remove_label(email.gmail_labels, "INBOX")
+        email.gmail_label_ids = _remove_label(email.gmail_label_ids, "INBOX")
+        db.add(
+            UserAction(
+                user_id=current_user.id,
+                email_id=email.id,
+                action_taken="archive",
+                action_source="manual",
+            )
+        )
+        archived.append(email.id)
+
+    db.commit()
+    return {"archived_count": len(archived), "archived_email_ids": archived, "skipped": skipped}
+
+
 @router.get("/{email_id}")
 def get_email_detail(
     email_id: int,
@@ -371,6 +481,8 @@ def get_email_detail(
         "gmail_labels": email.gmail_labels,
         "is_read": email.is_read,
         "has_unsubscribe": email.has_unsubscribe,
+        "received_at": email.received_at,
+        "created_at": email.created_at,
         "risk_flags": evaluate_risk_flags(
             sender_email=email.sender_email,
             sender_domain=email.sender_domain,
@@ -452,15 +564,11 @@ def execute_cleanup_action(
         raise HTTPException(status_code=404, detail="Email not found")
 
     account = AccountService(db).get_primary_account(current_user.id)
-    if not account:
+    is_demo_email = _is_demo_email(email)
+    if not account and not is_demo_email:
         raise HTTPException(status_code=400, detail="Connect a Gmail account first")
 
-    latest_classification = (
-        db.query(Classification)
-        .filter(Classification.email_id == email.id)
-        .order_by(Classification.created_at.desc())
-        .first()
-    )
+    latest_classification = _get_latest_classification(db, email.id)
     risk_flags = evaluate_risk_flags(
         sender_email=email.sender_email,
         sender_domain=email.sender_domain,
@@ -483,30 +591,39 @@ def execute_cleanup_action(
             },
         )
 
-    gmail_service = GmailService(db)
+    gmail_service = GmailService(db) if account else None
     if payload.action == "archive":
-        gmail_service.archive_message(account, email.gmail_message_id)
+        if account:
+            gmail_service.archive_message(account, email.gmail_message_id)
         email.gmail_labels = _remove_label(email.gmail_labels, "INBOX")
         email.gmail_label_ids = _remove_label(email.gmail_label_ids, "INBOX")
     elif payload.action == "trash":
-        gmail_service.trash_message(account, email.gmail_message_id)
+        if account:
+            gmail_service.trash_message(account, email.gmail_message_id)
         email.gmail_labels = _add_label(_remove_label(email.gmail_labels, "INBOX"), "TRASH")
         email.gmail_label_ids = _add_label(_remove_label(email.gmail_label_ids, "INBOX"), "TRASH")
     elif payload.action == "mark_read":
-        gmail_service.mark_as_read(account, email.gmail_message_id)
+        if account:
+            gmail_service.mark_as_read(account, email.gmail_message_id)
         email.is_read = True
         email.gmail_labels = _remove_label(email.gmail_labels, "UNREAD")
         email.gmail_label_ids = _remove_label(email.gmail_label_ids, "UNREAD")
     elif payload.action == "label":
         if not payload.label_names:
             raise HTTPException(status_code=400, detail="label_names is required for label action")
-        label_ids = gmail_service.apply_labels(
-            account,
-            email.gmail_message_id,
-            payload.label_names,
-        )
-        existing = set((email.gmail_label_ids or "").split(",")) if email.gmail_label_ids else set()
-        email.gmail_label_ids = ",".join(sorted(existing.union(label_ids)))
+        if account:
+            label_ids = gmail_service.apply_labels(
+                account,
+                email.gmail_message_id,
+                payload.label_names,
+            )
+            existing = set((email.gmail_label_ids or "").split(",")) if email.gmail_label_ids else set()
+            email.gmail_label_ids = ",".join(sorted(existing.union(label_ids)))
+        else:
+            existing_ids = set((email.gmail_label_ids or "").split(",")) if email.gmail_label_ids else set()
+            existing_names = set((email.gmail_labels or "").split(",")) if email.gmail_labels else set()
+            email.gmail_label_ids = ",".join(sorted(existing_ids.union(payload.label_names)))
+            email.gmail_labels = ",".join(sorted(existing_names.union(payload.label_names)))
     else:
         raise HTTPException(status_code=400, detail="Unsupported action")
 
@@ -592,6 +709,15 @@ def _get_owned_email(db: Session, current_user: User, email_id: int) -> Email | 
     )
 
 
+def _get_latest_classification(db: Session, email_id: int) -> Classification | None:
+    return (
+        db.query(Classification)
+        .filter(Classification.email_id == email_id)
+        .order_by(Classification.created_at.desc())
+        .first()
+    )
+
+
 def _email_is_in_inbox():
     return or_(
         Email.gmail_labels == "INBOX",
@@ -599,6 +725,28 @@ def _email_is_in_inbox():
         Email.gmail_labels.like("%,INBOX"),
         Email.gmail_labels.like("%,INBOX,%"),
     )
+
+
+def _has_inbox_label(value: str | None) -> bool:
+    if not value:
+        return False
+    labels = {item.strip() for item in value.split(",") if item.strip()}
+    return "INBOX" in labels
+
+
+def _is_demo_email(email: Email) -> bool:
+    return bool(email.gmail_message_id and email.gmail_message_id.startswith("demo-"))
+
+
+def _all_demo_emails(db: Session, current_user: User, email_ids: list[int]) -> bool:
+    if not email_ids:
+        return False
+    emails = (
+        db.query(Email)
+        .filter(Email.user_id == current_user.id, Email.id.in_(email_ids))
+        .all()
+    )
+    return len(emails) == len(email_ids) and all(_is_demo_email(email) for email in emails)
 
 
 def _remove_label(value: str | None, label: str) -> str | None:

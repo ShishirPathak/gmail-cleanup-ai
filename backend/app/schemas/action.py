@@ -15,3 +15,7 @@ class CleanupActionRequest(BaseModel):
     action: str = Field(..., pattern="^(archive|trash|mark_read|label)$")
     label_names: List[str] = Field(default_factory=list)
     confirm_high_risk: bool = False
+
+
+class BulkArchiveRequest(BaseModel):
+    email_ids: List[int] = Field(default_factory=list)
